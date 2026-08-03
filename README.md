@@ -1,0 +1,148 @@
+# lr-crop-calculator
+
+MediaPipeで人物を自動検出し、Lightroom Classicで非破壊クロップを一括適用するためのツールセットです。
+
+元のJPGファイルには一切変更を加えず、Lightroom Classicのカタログ上でのみ
+非破壊クロップを一括適用します。
+
+## 特徴
+
+- 元のJPG本体は無加工(読み取りのみ)。クロップはLightroomのカタログ内メタデータとして適用
+- 出力アスペクト比は常に元画像と同一
+- 人物の鼻の位置を基準に水平方向中央配置
+- 全身写真は人物が切れないよう上下左右に約8%の余白を確保
+- 全身でない写真はヒップラインを目安にした半身ポートレート風のクロップ
+- EXIF Orientation(スマートフォン等の回転情報付き画像)に対応
+
+## リポジトリ構成
+
+```
+lr-crop-calculator/
+├── crop_calculator.py     ... 画像を解析してクロップ情報CSVを生成するメインスクリプト
+├── debug_single.py        ... 1枚の画像を詳細診断するデバッグ用スクリプト
+├── requirements.txt       ... 依存パッケージ
+├── LICENSE                ... MITライセンス
+├── .gitignore
+└── lightroom_plugin/
+    ├── Info.lua               ... Lightroomプラグイン定義
+    └── ApplyCropFromCSV.lua   ... CSVを読み込みクロップを適用する本体
+```
+
+
+## 1. Pythonスクリプトのセットアップ
+
+```bash
+pip install -r requirements.txt
+```
+
+初回実行時、姿勢推定モデル(pose_landmarker_full.task, 約30MB)を
+Googleのサーバーから自動ダウンロードします。インターネット接続が必要です。
+
+## 2. クロップ情報CSVの生成
+
+```bash
+python crop_calculator.py --input /path/to/jpg_folder --output crop_data.csv
+```
+
+サブフォルダも含めて処理したい場合は `--recursive` を追加してください。
+
+### 出力CSVの列
+
+| 列名 | 内容 |
+|---|---|
+| filename | ファイル名(拡張子含む。Lightroom側もファイル名でマッチングします) |
+| CropTop / CropLeft / CropRight / CropBottom | 画像全体を0.0〜1.0とした場合のクロップ枠の各辺の位置 |
+| full_body | 1=全身写真と判定, 0=それ以外 |
+| status | OK / NO_PERSON_DETECTED(人物検出失敗。この行はLightroom側でスキップされます) |
+
+`status` が `NO_PERSON_DETECTED` の行はクロップが計算されていません。該当写真は
+CSVを見て手動で確認・修正するか、そのまま未クロップにしておいてください。
+
+### クロップロジック
+
+- 出力アスペクト比は常に元画像と同じ(ズームイン/ズームアウトのみでクロップ)
+- 水平方向: 鼻の位置を基準に中央配置(鼻が検出できない場合は目→肩→バウンディング
+  ボックス中心の順にフォールバック)。基準位置が体の中心からズレていても、
+  人物全体が入るようクロップ幅を自動調整します
+- 全身写真: 人物が絶対に切れないことを優先しつつ、上下・左右ともに約8%の余白を確保
+  (人物のプロポーションと画像アスペクト比の関係で、片方の余白が8%より大きくなることがあります)
+- 全身でない写真: 頭上の余分な余白を削除しつつ上部余白を約8%確保。下端はヒップの
+  ランドマークが検出できればそこを目安にし(脚やスカートが写っていてもそこまでは
+  含めない、半身ポートレート風の仕上がり)、ヒップが見えていない場合はそのまま
+  見えている範囲を使います
+
+パラメータ(余白率・判定の閾値など)は `crop_calculator.py` 冒頭の定数で調整できます。
+特に自動検出の精度に納得できない場合は `VISIBILITY_THRESHOLD` や `HEAD_PAD_FACTOR` を
+何枚かのサンプルで試しながら調整することをおすすめします。
+
+### EXIF Orientationへの対応
+
+スマートフォンや一部のカメラで撮影した写真は、ピクセルデータ自体は横向きのまま保存され、
+EXIFのOrientationタグで「表示時にどう回転するか」を指定していることがあります。
+
+Lightoomの`crs:CropTop/Left/Right/Bottom`はこの**保存時(回転補正前)の座標系**を基準に
+解釈されるため、本スクリプトは以下の手順で正しく変換しています。
+
+1. EXIF Orientationを読み取り、表示向き(見たまま)に回転補正した画像で人物検出・
+   クロップ計算(水平中央配置など)を行う
+2. 計算結果を、Orientationタグに応じて保存時の座標系に変換してからCSVに出力する
+
+そのため、通常は特に意識する必要はありません。ただし念のため、`debug_single.py`は
+表示向き座標・raw座標の両方をコンソールに出力するので、疑わしい写真があれば
+確認してみてください。
+
+## 3. Lightroomプラグインのインストール
+
+1. `lightroom_plugin` フォルダをそのまま任意の場所(例: `~/Documents/LightroomPlugins/CropFromCSV.lrplugin`)に置きます。
+   - フォルダ名の末尾を `.lrplugin` にリネームしてください(例: `lightroom_plugin` → `CropFromCSV.lrplugin`)。
+2. Lightroom Classic を開き、`ファイル > プラグインマネージャー` から「追加」を選び、上記フォルダを指定します。
+3. 対象の1000枚のJPGを、通常どおりLightroomのカタログに読み込んでおきます(まだの場合)。
+
+## 4. クロップの適用
+
+1. `ファイル > 追加ツール` メニューに追加された「CSVからクロップを適用...」を選択します。
+2. 手順2で生成した `crop_data.csv` を選択します。
+3. マッチ件数・未検出件数の確認ダイアログが出るので、内容を確認して「適用する」を押します。
+4. 完了後、適用件数・エラー件数のサマリーが表示されます。
+
+### 注意点
+
+- ファイル名で写真をマッチングするため、**同名ファイルがカタログ内に複数存在する場合は
+  意図しない写真に適用される可能性があります**。事前にカタログ内のファイル名重複がないか
+  確認することをおすすめします。
+- 元のJPG本体は変更されません。ただし、Lightroom側の「カタログ設定 > メタデータ」で
+  「変更を自動的にXMPに書き込む」がオンになっている場合、JPGファイル内のXMPメタデータ
+  (ファイル自体)に編集情報が書き込まれます。ピクセルデータ自体は変更されませんが、
+  「元のJPGに一切触れたくない」場合はこの設定をオフのままにしてください。
+- 1000枚規模の一括適用になるため、**必ず事前にカタログのバックアップを取り**、
+  まず数枚〜数十枚のテストデータで動作確認してから全件に適用することを強く推奨します。
+- Lightroom Classic の SDK バージョンにより `photo:applyDevelopSettings` の挙動が
+  異なる場合があります。手元のLightroomバージョンで少数サンプルでのテストをお願いします。
+
+## デバッグツール
+
+`debug_single.py` を使うと、1枚の写真に対する検出結果(全ランドマークの座標・
+visibility・presence)、計算されたバウンディングボックス、full_body判定、
+クロップ範囲(表示向き座標・raw座標の両方)をコンソールに出力し、
+検出結果を重ねた確認用画像を保存できます。クロップ位置がおかしいと感じたときの
+切り分けに使ってください。
+
+```bash
+python debug_single.py --input path/to/photo.jpg --output debug_out.jpg
+```
+
+## GitHubへのアップロード手順
+
+```bash
+cd lr-crop-calculator
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/<your-username>/<your-repo>.git
+git push -u origin main
+```
+
+## ライセンス
+
+[MIT License](LICENSE)

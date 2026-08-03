@@ -1,0 +1,16 @@
+# ポーズ検出モデル(実行時に自動ダウンロードされる、約30MB)
+pose_landmarker_full.task
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 生成物(人によってデータが異なるため含めない)
+crop_data.csv
+debug_out*.jpg
+
+# OS
+.DS_Store
+Thumbs.db
