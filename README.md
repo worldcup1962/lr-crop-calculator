@@ -96,7 +96,7 @@ Lightoomの`crs:CropTop/Left/Right/Bottom`はこの**保存時(回転補正前)�
 1. `lightroom_plugin` フォルダをそのまま任意の場所(例: `~/Documents/LightroomPlugins/CropFromCSV.lrplugin`)に置きます。
    - フォルダ名の末尾を `.lrplugin` にリネームしてください(例: `lightroom_plugin` → `CropFromCSV.lrplugin`)。
 2. Lightroom Classic を開き、`ファイル > プラグインマネージャー` から「追加」を選び、上記フォルダを指定します。
-3. 対象の1000枚のJPGを、通常どおりLightroomのカタログに読み込んでおきます(まだの場合)。
+3. 対象のJPGを、通常どおりLightroomのカタログに読み込んでおきます(まだの場合)。
 
 ## 4. クロップの適用
 
