@@ -131,18 +131,6 @@ visibility・presence)、計算されたバウンディングボックス、full
 python debug_single.py --input path/to/photo.jpg --output debug_out.jpg
 ```
 
-## GitHubへのアップロード手順
-
-```bash
-cd lr-crop-calculator
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/<your-username>/<your-repo>.git
-git push -u origin main
-```
-
 ## ライセンス
 
 [MIT License](LICENSE)
