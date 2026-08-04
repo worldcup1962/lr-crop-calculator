@@ -7,10 +7,12 @@ general_crop.py
 crop_calculator.py の宣材写真用ロジック(compute_crop, promoモード)は一切変更せず、
 そのまま維持する。本モジュールはそれとは独立した「別の構図方針」を提供する:
 
-- 人物を機械的に水平中央配置する promo モードとは異なり、視線・体の向きに応じて
-  左右非対称の余白(いわゆる「空間を残す」構図)を許容する
+- 人物(バウンディングボックス)の中心を画像の水平中央に配置する
+  (promoモードが「鼻」を基準に中央化するのに対し、こちらは体全体の中心を基準にする。
+   HORIZONTAL_CENTER_WEIGHT を下げると、視線・体の向きに応じた左右非対称の配置
+   ——いわゆる「空間を残す」構図——も許容できる)
 - 背景の情報量(エッジ密度で近似)を見て、うるさい側の余白を詰め、
-  すっきりした側の余白を広げる
+  すっきりした側の余白を広げる(クロップの「幅」に反映される)
 - 手動トリミングデータ(Lightroomのクロップ履歴)があれば、上記の余白を
   ルールベースの経験則ではなく学習済み回帰モデルから予測する
 
@@ -62,6 +64,12 @@ GAZE_MARGIN_BOOST = 0.10     # 視線・体の向きに応じた左右非対称�
 DENSITY_ADJUST_STRENGTH = 0.35
 DENSITY_FACTOR_RANGE = (0.6, 1.4)
 HEURISTIC_MARGIN_FLOOR = 0.02
+
+# 水平方向の配置: 1.0 = 人物(バウンディングボックス)の中心を必ず画像の水平中央に置く
+#                 0.0 = 予測された左右の余白(L, R)のとおりに配置する(非対称を許容)
+# 中間値にすると、その割合で両者を混ぜた位置になる。
+# 左右の余白はいずれの場合もクロップの「幅」の決定には使われる。
+HORIZONTAL_CENTER_WEIGHT = 1.0
 
 # モデル予測値に対する安全クランプ(暴走した予測で極端なクロップにならないように)
 MODEL_MARGIN_CLAMP = (-0.35, 1.5)
@@ -189,6 +197,8 @@ def heuristic_margins(features):
     base_side = BASE_SIDE_MARGIN
 
     # 視線・体の向きに応じて左右非対称に(向いている側に「空間」を残す)
+    # ※ HORIZONTAL_CENTER_WEIGHT=1.0(既定)では配置は中央固定になるため、
+    #    この左右差はクロップの「幅」にのみ影響する
     delta = GAZE_MARGIN_BOOST * features["gaze_dir"]
     left = base_side - delta / 2.0
     right = base_side + delta / 2.0
@@ -253,7 +263,30 @@ def margins_to_crop_box(info, margins):
         Hc = H
         Wc = Hc * aspect
 
-    crop_left = x1 - L * person_w
+    # --- 水平方向の配置 ---
+    # 予測された左右の余白(L, R)はクロップの「幅」を決めるのに使い、
+    # 「位置」は人物のバウンディングボックスの中心が画像の水平中央に来るよう配置する。
+    body_cx = (x1 + x2) / 2.0
+
+    if HORIZONTAL_CENTER_WEIGHT > 0.0:
+        # body_cx を中心にしたまま画像内に収まる最大の幅。
+        # これが人物の幅より狭い場合は、中央配置すると人物が切れてしまうため、
+        # 中央配置をあきらめて従来どおり端に寄せる(人物が切れない方を優先)。
+        max_centered_w = 2.0 * min(body_cx, W - body_cx)
+        if max_centered_w >= person_w:
+            Wc = min(Wc, max_centered_w)
+            Hc = Wc / aspect
+        crop_left_centered = body_cx - Wc / 2.0
+    else:
+        crop_left_centered = None
+
+    crop_left_asym = x1 - L * person_w
+    if crop_left_centered is None:
+        crop_left = crop_left_asym
+    else:
+        w = HORIZONTAL_CENTER_WEIGHT
+        crop_left = w * crop_left_centered + (1.0 - w) * crop_left_asym
+
     crop_right = crop_left + Wc
     if crop_left < 0:
         crop_right -= crop_left
