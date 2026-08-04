@@ -45,7 +45,7 @@ import os
 import urllib.request
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
@@ -66,6 +66,13 @@ FOOT_PAD_RATIO = 0.02        # 足元(全身時)にわずかに足す余白(人�
 FULL_BODY_VIS_THRESHOLD = 0.7       # 足首・膝の visibility がこれ以上
 FULL_BODY_PRESENCE_THRESHOLD = 0.7  # 足首・膝の presence(画像内に実在する確信度)がこれ以上
 FULL_BODY_FRAME_TOLERANCE = 0.0     # 正規化座標がこの許容誤差を超えて枠外ならNG(0.0=枠内必須)
+
+# フォールバック検出時の妥当性チェック: 見えているランドマークがこの数未満なら
+# 顔の一部だけを拾った誤検出とみなして採用しない
+FALLBACK_MIN_VISIBLE_LANDMARKS = 10
+# 同上: 検出された人物の範囲が画像に対してこの割合未満なら、背景の模様などを
+# 人物と誤認したとみなす(ポートレート写真では人物は相応の大きさで写っている前提)
+FALLBACK_MIN_PERSON_EXTENT = 0.25
 
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
@@ -98,16 +105,112 @@ def ensure_model():
         print("ダウンロード完了。")
 
 
-def create_landmarker():
+def _create_raw_landmarker(confidence=0.5):
     base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
     options = mp_vision.PoseLandmarkerOptions(
         base_options=base_options,
         running_mode=mp_vision.RunningMode.IMAGE,
         num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
+        min_pose_detection_confidence=confidence,
+        min_pose_presence_confidence=confidence,
     )
     return mp_vision.PoseLandmarker.create_from_options(options)
+
+
+# 検出のフォールバック段階: (最大辺, 信頼度の閾値, コントラスト強調倍率)
+#
+# ハイキー(白飛び気味)で低コントラストな人物写真では、原寸・閾値0.5のままだと
+# 人物がはっきり写っていても検出に失敗することがある。縮小やコントラスト強調で
+# 検出できるようになるため、失敗した場合のみ順に試す。
+#
+# 1段階目は従来と同一の条件なので、これまで検出できていた写真の結果は変わらない。
+# ランドマークは正規化座標(0-1)で返るため、縮小して検出しても座標はそのまま使える。
+# コントラスト強調も幾何情報は変えないため、クロップ計算に影響しない。
+DETECT_STAGES = [
+    (None, 0.5, None),    # 既定(従来どおり)
+    (1536, 0.5, None),
+    (768, 0.5, None),
+    (None, 0.25, 1.5),
+    (768, 0.25, 1.5),
+    (512, 0.25, None),
+    (None, 0.1, None),    # 最後の手段
+]
+
+
+def _is_plausible_pose(lm):
+    """フォールバック検出の結果が人物として妥当かを判定する。
+
+    閾値を緩めて検出すると、顔の一部だけを拾って極端に小さい範囲を
+    「人物」と誤認することがある(そのままクロップすると顔の一部だけを
+    切り抜いた壊滅的な結果になる)。そのため、
+      - 肩が最低1つ見えていること
+      - 頭部(鼻または目)が見えていること
+      - 一定数以上のランドマークが見えていること
+      - 人物の範囲が画像に対して極端に小さくないこと
+        (背景の模様や小物を人物と誤認するのを防ぐ)
+    を満たす場合のみ採用する。
+    """
+    def visible(idx):
+        return lm[idx].visibility >= VISIBILITY_THRESHOLD
+
+    visible_idx = [i for i in ALL_LANDMARKS if visible(i)]
+    if len(visible_idx) < FALLBACK_MIN_VISIBLE_LANDMARKS:
+        return False
+    if not (visible(LEFT_SHOULDER) or visible(RIGHT_SHOULDER)):
+        return False
+    if not (visible(NOSE) or visible(LEFT_EYE) or visible(RIGHT_EYE)):
+        return False
+
+    xs = [lm[i].x for i in visible_idx]
+    ys = [lm[i].y for i in visible_idx]
+    extent = max(max(xs) - min(xs), max(ys) - min(ys))
+    return extent >= FALLBACK_MIN_PERSON_EXTENT
+
+
+class PoseDetector:
+    """段階的なフォールバックつきの姿勢検出器。
+
+    detect_pose() は (ランドマーク, 段階のインデックス) を返す。
+    段階0は従来と同じ条件での検出を意味する。
+    """
+
+    def __init__(self, use_fallback=True):
+        self.use_fallback = use_fallback
+        self._landmarkers = {}
+
+    def _landmarker(self, confidence):
+        if confidence not in self._landmarkers:
+            self._landmarkers[confidence] = _create_raw_landmarker(confidence)
+        return self._landmarkers[confidence]
+
+    def detect_pose(self, disp_img):
+        stages = DETECT_STAGES if self.use_fallback else DETECT_STAGES[:1]
+        for stage_index, (max_dim, confidence, contrast) in enumerate(stages):
+            img = disp_img
+            if max_dim is not None:
+                img = img.copy()
+                img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            if contrast is not None:
+                img = ImageEnhance.Contrast(img).enhance(contrast)
+
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(img))
+            result = self._landmarker(confidence).detect(mp_image)
+            if result.pose_landmarks:
+                lm = result.pose_landmarks[0]
+                # 段階0(従来条件)の結果は、これまでの動作を変えないため
+                # 無条件に採用する。フォールバックの結果のみ妥当性を確認する。
+                if stage_index == 0 or _is_plausible_pose(lm):
+                    return lm, stage_index
+        return None, None
+
+    def close(self):
+        for lm in self._landmarkers.values():
+            lm.close()
+        self._landmarkers.clear()
+
+
+def create_landmarker(use_fallback=True):
+    return PoseDetector(use_fallback=use_fallback)
 
 
 def get_exif_orientation(pil_img):
@@ -137,14 +240,9 @@ def analyze_image(path, landmarker):
     disp_img = ImageOps.exif_transpose(pil_img).convert("RGB")  # 表示向きに回転補正
     W, H = disp_img.size  # 表示向きの寸法(人物検出・クロップ計算に使用)
 
-    img_rgb = np.array(disp_img)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-    result = landmarker.detect(mp_image)
-
-    if not result.pose_landmarks:
+    lm, detect_stage = landmarker.detect_pose(disp_img)  # 最も信頼度の高い1人分
+    if lm is None:
         return None
-
-    lm = result.pose_landmarks[0]  # 最も信頼度の高い1人分
 
     def px(idx):
         p = lm[idx]
@@ -266,7 +364,7 @@ def analyze_image(path, landmarker):
         "x1": x1, "y1": y1, "x2": x2, "y2": y2, "W": W, "H": H,
         "full_body": full_body, "center_x": center_x,
         "orientation": orientation, "raw_W": raw_W, "raw_H": raw_H,
-        "disp_img": disp_img, "landmarks": lm,
+        "disp_img": disp_img, "landmarks": lm, "detect_stage": detect_stage,
     }
 
 
@@ -424,6 +522,10 @@ def main():
              " general: 汎用ポートレートクロップ(視線・背景密度を考慮した非対称構図)",
     )
     parser.add_argument(
+        "--no-detect-fallback", action="store_true",
+        help="人物検出に失敗した場合の再試行(縮小・コントラスト強調・閾値緩和)を行わない",
+    )
+    parser.add_argument(
         "--model", default=None,
         help="general モード用の学習済みモデル(train_general_crop_model.py の出力)。"
              " 未指定/未学習の場合はヒューリスティックにフォールバックする。",
@@ -462,7 +564,7 @@ def main():
     print(f"対象画像: {len(image_paths)} 件")
 
     rows = []
-    landmarker = create_landmarker()
+    landmarker = create_landmarker(use_fallback=not args.no_detect_fallback)
     try:
         for i, path in enumerate(image_paths, 1):
             filename = os.path.basename(path)
@@ -472,7 +574,7 @@ def main():
                     "filename": filename,
                     "path": os.path.abspath(path),
                     "CropTop": "", "CropLeft": "", "CropRight": "", "CropBottom": "",
-                    "full_body": "", "status": "NO_PERSON_DETECTED",
+                    "full_body": "", "status": "NO_PERSON_DETECTED", "detect_stage": "",
                 })
                 print(f"[{i}/{len(image_paths)}] {filename}: 人物検出失敗")
                 continue
@@ -491,21 +593,31 @@ def main():
                 "CropBottom": f"{crop_raw['CropBottom']:.6f}",
                 "full_body": "1" if info["full_body"] else "0",
                 "status": "OK",
+                "detect_stage": str(info["detect_stage"]),
             })
-            print(f"[{i}/{len(image_paths)}] {filename}: OK (full_body={info['full_body']}, orientation={info['orientation']})")
+            stage_note = "" if info["detect_stage"] == 0 else f" [検出フォールバック段階{info['detect_stage']}]"
+            print(f"[{i}/{len(image_paths)}] {filename}: OK (full_body={info['full_body']}, orientation={info['orientation']}){stage_note}")
     finally:
         landmarker.close()
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "filename", "path", "CropTop", "CropLeft", "CropRight", "CropBottom",
-            "full_body", "status",
+            "full_body", "status", "detect_stage",
         ])
         writer.writeheader()
         writer.writerows(rows)
 
     ok_count = sum(1 for r in rows if r["status"] == "OK")
+    fallback_rows = [r for r in rows if r["status"] == "OK" and r["detect_stage"] not in ("", "0")]
     print(f"\n完了: {ok_count}/{len(rows)} 件成功。出力先: {args.output}")
+    if fallback_rows:
+        print(f"\nうち {len(fallback_rows)} 件は通常の条件では検出できず、"
+              "再試行(縮小・コントラスト強調等)で検出しました。")
+        print("これらは検出精度が落ちている可能性があるため、クロップ結果の確認をおすすめします"
+              "(CSVの detect_stage 列が 0 以外の行):")
+        for r in fallback_rows:
+            print(f"  - {r['filename']} (detect_stage={r['detect_stage']})")
 
 
 if __name__ == "__main__":

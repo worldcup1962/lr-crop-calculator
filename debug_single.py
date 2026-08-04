@@ -23,10 +23,8 @@ general モードでは、判定に使った特徴量(視線方向・背景密�
 """
 
 import argparse
-import numpy as np
 from PIL import Image, ImageDraw
 
-import mediapipe as mp
 import crop_calculator as cc
 
 
@@ -86,19 +84,18 @@ def main():
     W, H = info["W"], info["H"]
     print(f"表示向き(回転補正後)サイズ: W={W}, H={H}")
 
-    # ランドマークをもう一度取得して詳細表示(analyze_image内部と同じ手順)
-    from PIL import ImageOps
-    disp_img = ImageOps.exif_transpose(pil_img).convert("RGB")
-    img_rgb = np.array(disp_img)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+    stage = info["detect_stage"]
+    if stage == 0:
+        print("検出: 通常条件(段階0)で成功")
+    else:
+        max_dim, conf, contrast = cc.DETECT_STAGES[stage]
+        print(f"検出: 通常条件では失敗し、フォールバック段階{stage}で成功 "
+              f"(最大辺={max_dim}, 閾値={conf}, コントラスト強調={contrast})")
+        print("  ※ この写真は検出精度が落ちている可能性があるため、結果の確認を推奨します")
 
-    landmarker2 = cc.create_landmarker()
-    try:
-        result = landmarker2.detect(mp_image)
-    finally:
-        landmarker2.close()
-
-    lm = result.pose_landmarks[0]
+    # analyze_image が実際に使ったランドマーク・表示向き画像をそのまま使う
+    disp_img = info["disp_img"]
+    lm = info["landmarks"]
     print("\n--- 全ランドマーク (idx: 名前  x_norm, y_norm  visibility  presence) ---")
     for idx in range(33):
         p = lm[idx]
