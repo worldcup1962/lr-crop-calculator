@@ -8,7 +8,7 @@ crop_calculator.py
 - 出力アスペクト比は元画像と同一(ズームイン/ズームアウトのみでクロップ)
 - 人物を水平方向中央に配置
 - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
-- 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
+- 全身写真の場合: 人物が切れないよう上下に約7%の余白を確保
 
 【EXIF Orientation対応】
 Lightroom(Adobe Camera Raw)の crs:CropTop/Left/Right/Bottom は、
