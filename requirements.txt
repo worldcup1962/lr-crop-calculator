@@ -1,3 +1,7 @@
 mediapipe
 Pillow
 numpy
+
+# 以下は --mode general の学習済みモデルを使う/学習する場合のみ必要
+# (--mode general はモデルなしでもヒューリスティックで動作する)
+scikit-learn

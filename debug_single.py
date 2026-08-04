@@ -12,8 +12,14 @@ debug_single.py
 確認用画像は「表示向き(EXIF回転補正後、見たままの向き)」で描画されます。
 実際にLightroomへ渡すCSVの値は raw 座標系である点に注意してください。
 
+crop_calculator.py と同じく --mode promo/general に対応しています。
+general モードでは、判定に使った特徴量(視線方向・背景密度など)と
+予測された余白(L/R/T/B)もあわせて表示します。
+
 使い方:
     python debug_single.py --input path/to/photo.jpg --output debug_out.jpg
+    python debug_single.py --input path/to/photo.jpg --output debug_out.jpg \
+        --mode general --model general_crop_model.pkl
 """
 
 import argparse
@@ -41,7 +47,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", default="debug_out.jpg")
+    parser.add_argument("--mode", choices=["promo", "general"], default="promo")
+    parser.add_argument("--model", default=None,
+                         help="general モード用の学習済みモデル(省略時はスクリプトと同じ"
+                              "フォルダの general_crop_model.pkl を探す。無ければヒューリスティック)")
     args = parser.parse_args()
+
+    general_model = None
+    if args.mode == "general":
+        import os
+        import general_crop
+        model_path = args.model or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "general_crop_model.pkl"
+        )
+        general_model = general_crop.load_model(model_path)
+        if general_model is None:
+            print(f"[general] 学習済みモデルが見つかりません({model_path})。ヒューリスティックを使用します。")
+        else:
+            print(f"[general] 学習済みモデルを読み込みました: {model_path}")
 
     cc.ensure_model()
 
@@ -88,10 +111,18 @@ def main():
     print(f"person_w={info['x2']-info['x1']:.1f}  person_h={info['y2']-info['y1']:.1f}")
     print(f"full_body = {info['full_body']}")
 
-    crop_display = cc.compute_crop(info)
+    if args.mode == "general":
+        crop_display, features, margins = general_crop.compute_crop_general(info, general_model)
+        print("\n--- generalモード: 特徴量 ---")
+        for k, v in features.items():
+            print(f"  {k}: {v:.4f}")
+        print("--- generalモード: 予測された余白(person幅/高さに対する比率) ---")
+        print(f"  L={margins['L']:.4f}  R={margins['R']:.4f}  T={margins['T']:.4f}  B={margins['B']:.4f}")
+    else:
+        crop_display = cc.compute_crop(info)
     crop_raw = cc.display_crop_to_raw(crop_display, orientation)
 
-    print("\n--- 表示向き座標でのクロップ(0-1割合) ---")
+    print(f"\n--- 表示向き座標でのクロップ(0-1割合、mode={args.mode}) ---")
     print(crop_display)
     print("--- CSVに出力される raw(保存時)座標でのクロップ(0-1割合) ---")
     print(crop_raw)
@@ -124,7 +155,7 @@ def main():
             draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 0))
 
     vis.save(args.output, quality=95)
-    print(f"\n確認用画像を保存しました(表示向き): {args.output}")
+    print(f"\n確認用画像を保存しました(表示向き、mode={args.mode}): {args.output}")
     print("  緑枠 = 検出された人物のバウンディングボックス")
     print("  赤枠 = 計算されたクロップ範囲(表示向き座標)")
     print("  黄色い点 = visibility>=0.3のランドマーク")

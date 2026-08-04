@@ -8,7 +8,7 @@ crop_calculator.py
 - 出力アスペクト比は元画像と同一(ズームイン/ズームアウトのみでクロップ)
 - 人物を水平方向中央に配置
 - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
-- 全身写真の場合: 人物が切れないよう上下に約7%の余白を確保
+- 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
 
 【EXIF Orientation対応】
 Lightroom(Adobe Camera Raw)の crs:CropTop/Left/Right/Bottom は、
@@ -30,7 +30,10 @@ MediaPipe Tasks API (PoseLandmarker) を使用します。
     python crop_calculator.py --input /path/to/jpgs --output crop_data.csv
 
 出力CSV列:
-    filename, CropTop, CropLeft, CropRight, CropBottom, full_body, status
+    filename, path, CropTop, CropLeft, CropRight, CropBottom, full_body, status
+
+path は元画像の絶対パス。Lightroom側はこのパスで写真を特定する(ファイル名だけだと、
+撮影日フォルダをまたいで同名ファイルがある場合に別の写真へ適用されてしまうため)。
 
 CropTop/Left/Right/Bottom は Lightroom の crs:CropTop 等と同じ定義で、
 画像の保存時ピクセル配置を 0.0-1.0 とした場合の「クロップ枠の各辺の位置」。
@@ -263,6 +266,7 @@ def analyze_image(path, landmarker):
         "x1": x1, "y1": y1, "x2": x2, "y2": y2, "W": W, "H": H,
         "full_body": full_body, "center_x": center_x,
         "orientation": orientation, "raw_W": raw_W, "raw_H": raw_H,
+        "disp_img": disp_img, "landmarks": lm,
     }
 
 
@@ -363,12 +367,81 @@ def display_crop_to_raw(crop, orientation):
     }
 
 
+def raw_crop_to_display(crop, orientation):
+    """display_crop_to_raw() の数学的な逆変換。
+
+    Lightroomのカタログから読み出した(保存時/raw座標系の)クロップ値を、
+    人物検出を行った表示向き座標系に戻すために使う(汎用ポートレートモデルの
+    学習データ作成用)。
+
+    注意: orientation 6/8 (90度回転)は raw<->display が自己逆変換ではないため、
+    display_crop_to_raw の inv() をそのまま流用すると不正な結果になる。
+    ここでは inv() の真の逆写像を個別に定義している。
+    """
+    rLeft, rTop = crop["CropLeft"], crop["CropTop"]
+    rRight, rBottom = crop["CropRight"], crop["CropBottom"]
+
+    def fwd(x, y):
+        # 保存時(raw)正規化座標 (x,y) -> 表示向き正規化座標
+        if orientation == 1:
+            return x, y
+        elif orientation == 2:
+            return 1 - x, y
+        elif orientation == 3:
+            return 1 - x, 1 - y
+        elif orientation == 4:
+            return x, 1 - y
+        elif orientation == 5:
+            return y, x
+        elif orientation == 6:
+            return 1 - y, x
+        elif orientation == 7:
+            return 1 - y, 1 - x
+        elif orientation == 8:
+            return y, 1 - x
+        else:
+            return x, y
+
+    u1, v1 = fwd(rLeft, rTop)
+    u2, v2 = fwd(rRight, rBottom)
+
+    return {
+        "CropLeft": min(u1, u2),
+        "CropRight": max(u1, u2),
+        "CropTop": min(v1, v2),
+        "CropBottom": max(v1, v2),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="人物写真のクロップ情報CSVを生成")
     parser.add_argument("--input", required=True, help="JPG画像が入ったフォルダ")
     parser.add_argument("--output", default="crop_data.csv", help="出力CSVファイルパス")
     parser.add_argument("--recursive", action="store_true", help="サブフォルダも再帰的に処理")
+    parser.add_argument(
+        "--mode", choices=["promo", "general"], default="promo",
+        help="promo: 宣材写真用ロジック(既定、従来通り)。"
+             " general: 汎用ポートレートクロップ(視線・背景密度を考慮した非対称構図)",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="general モード用の学習済みモデル(train_general_crop_model.py の出力)。"
+             " 未指定/未学習の場合はヒューリスティックにフォールバックする。",
+    )
     args = parser.parse_args()
+
+    general_model = None
+    if args.mode == "general":
+        import general_crop
+        model_path = args.model or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "general_crop_model.pkl"
+        )
+        general_model = general_crop.load_model(model_path)
+        if general_model is None:
+            print(f"[general] 学習済みモデルが見つかりません({model_path})。"
+                  "ヒューリスティックでクロップを計算します。")
+        else:
+            print(f"[general] 学習済みモデルを読み込みました: {model_path}")
 
     ensure_model()
 
@@ -397,16 +470,21 @@ def main():
             if info is None:
                 rows.append({
                     "filename": filename,
+                    "path": os.path.abspath(path),
                     "CropTop": "", "CropLeft": "", "CropRight": "", "CropBottom": "",
                     "full_body": "", "status": "NO_PERSON_DETECTED",
                 })
                 print(f"[{i}/{len(image_paths)}] {filename}: 人物検出失敗")
                 continue
 
-            crop_display = compute_crop(info)
+            if args.mode == "general":
+                crop_display, _features, _margins = general_crop.compute_crop_general(info, general_model)
+            else:
+                crop_display = compute_crop(info)
             crop_raw = display_crop_to_raw(crop_display, info["orientation"])
             rows.append({
                 "filename": filename,
+                "path": os.path.abspath(path),
                 "CropTop": f"{crop_raw['CropTop']:.6f}",
                 "CropLeft": f"{crop_raw['CropLeft']:.6f}",
                 "CropRight": f"{crop_raw['CropRight']:.6f}",
@@ -420,7 +498,7 @@ def main():
 
     with open(args.output, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "filename", "CropTop", "CropLeft", "CropRight", "CropBottom",
+            "filename", "path", "CropTop", "CropLeft", "CropRight", "CropBottom",
             "full_body", "status",
         ])
         writer.writeheader()

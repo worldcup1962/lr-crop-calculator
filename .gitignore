@@ -1,16 +1,19 @@
-# ポーズ検出モデル(実行時に自動ダウンロードされる、約30MB)
+# 姿勢推定モデル(初回実行時に自動ダウンロードされる、約9MB)
 pose_landmarker_full.task
+
+# 学習済みモデル(train_general_crop_model.py で再生成できる)
+*.pkl
+
+# 生成物・検証用データ(元画像の絶対パスや個人の写真情報を含むため)
+crop_data.csv
+export_crop.csv
+verify*.csv
+debug_out.jpg
+debug_*.jpg
 
 # Python
 __pycache__/
-*.pyc
-.venv/
-venv/
+*.py[cod]
 
-# 生成物(人によってデータが異なるため含めない)
-crop_data.csv
-debug_out*.jpg
-
-# OS
-.DS_Store
-Thumbs.db
+# ローカル設定
+.claude/settings.local.json

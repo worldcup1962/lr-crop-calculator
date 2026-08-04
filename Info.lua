@@ -10,7 +10,11 @@ return {
             title = "CSVからクロップを適用...",
             file = "ApplyCropFromCSV.lua",
         },
+        {
+            title = "クロップ履歴をCSVに書き出す...",
+            file = "ExportCropHistory.lua",
+        },
     },
 
-    VERSION = { major = 1, minor = 0, revision = 0, build = 0 },
+    VERSION = { major = 2, minor = 0, revision = 0, build = 0 },
 }
