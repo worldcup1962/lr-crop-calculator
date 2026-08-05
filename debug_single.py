@@ -12,14 +12,13 @@ debug_single.py
 確認用画像は「表示向き(EXIF回転補正後、見たままの向き)」で描画されます。
 実際にLightroomへ渡すCSVの値は raw 座標系である点に注意してください。
 
-crop_calculator.py と同じく --mode promo/general に対応しています。
+crop_calculator.py と同じく --mode general(既定)/promo に対応しています。
 general モードでは、判定に使った特徴量(視線方向・背景密度など)と
 予測された余白(L/R/T/B)もあわせて表示します。
 
 使い方:
     python debug_single.py --input path/to/photo.jpg --output debug_out.jpg
-    python debug_single.py --input path/to/photo.jpg --output debug_out.jpg \
-        --mode general --model general_crop_model.pkl
+    python debug_single.py --input path/to/photo.jpg --output debug_out.jpg --mode promo
 """
 
 import argparse
@@ -45,7 +44,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", default="debug_out.jpg")
-    parser.add_argument("--mode", choices=["promo", "general"], default="promo")
+    parser.add_argument("--mode", choices=["general", "promo"], default="general")
     parser.add_argument("--model", default=None,
                          help="general モード用の学習済みモデル(省略時はスクリプトと同じ"
                               "フォルダの general_crop_model.pkl を探す。無ければヒューリスティック)")

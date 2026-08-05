@@ -4,11 +4,20 @@ crop_calculator.py
 
 人物写真(JPG)のフォルダを解析し、Lightroom Classic用のクロップ情報CSVを生成する。
 
+共通の性質:
 - 元のJPGファイルには一切書き込みを行わない(読み込みのみ)
 - 出力アスペクト比は元画像と同一(ズームイン/ズームアウトのみでクロップ)
-- 人物を水平方向中央に配置
-- 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
-- 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
+
+クロップ方針は --mode で選ぶ:
+
+  general (既定)  汎用ポートレート。手動クロップ実績から学習したモデルで
+                  上下左右の余白を予測する(general_crop.py)。学習済みモデルが
+                  無い場合はヒューリスティックにフォールバックする。
+
+  promo           宣材写真用の従来ロジック(固定ルール)。
+                  - 人物(鼻の位置)を水平方向中央に配置
+                  - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
+                  - 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
 
 【EXIF Orientation対応】
 Lightroom(Adobe Camera Raw)の crs:CropTop/Left/Right/Bottom は、
@@ -517,9 +526,9 @@ def main():
     parser.add_argument("--output", default="crop_data.csv", help="出力CSVファイルパス")
     parser.add_argument("--recursive", action="store_true", help="サブフォルダも再帰的に処理")
     parser.add_argument(
-        "--mode", choices=["promo", "general"], default="promo",
-        help="promo: 宣材写真用ロジック(既定、従来通り)。"
-             " general: 汎用ポートレートクロップ(視線・背景密度を考慮した非対称構図)",
+        "--mode", choices=["general", "promo"], default="general",
+        help="general: 汎用ポートレートクロップ(既定。手動クロップ実績を学習したモデルを使用)。"
+             " promo: 宣材写真用ロジック(人物を水平中央に配置する従来の固定ルール)",
     )
     parser.add_argument(
         "--no-detect-fallback", action="store_true",
