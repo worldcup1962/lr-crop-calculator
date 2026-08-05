@@ -14,9 +14,15 @@ debug_*.jpg
 # Python
 __pycache__/
 *.py[cod]
+.venv/
+venv/
 
 # 配布用アーカイブ(リポジトリ本体と二重管理になるためコミットしない)
 *.zip
 
 # ローカル設定
 .claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db

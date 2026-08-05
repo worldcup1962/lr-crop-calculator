@@ -16,8 +16,8 @@ crop_calculator.py
 
   promo           宣材写真用の従来ロジック(固定ルール)。
                   - 人物(鼻の位置)を水平方向中央に配置
-                  - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
-                  - 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
+                  - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約7%確保
+                  - 全身写真の場合: 人物が切れないよう上下に約7%の余白を確保
 
 【EXIF Orientation対応】
 Lightroom(Adobe Camera Raw)の crs:CropTop/Left/Right/Bottom は、
@@ -39,7 +39,7 @@ MediaPipe Tasks API (PoseLandmarker) を使用します。
     python crop_calculator.py --input /path/to/jpgs --output crop_data.csv
 
 出力CSV列:
-    filename, path, CropTop, CropLeft, CropRight, CropBottom, full_body, status
+    filename, path, CropTop, CropLeft, CropRight, CropBottom, full_body, status, detect_stage
 
 path は元画像の絶対パス。Lightroom側はこのパスで写真を特定する(ファイル名だけだと、
 撮影日フォルダをまたいで同名ファイルがある場合に別の写真へ適用されてしまうため)。
@@ -390,10 +390,10 @@ def compute_crop(info):
     wc_from_width = person_w / (1 - 2 * MARGIN_RATIO)
 
     if info["full_body"]:
-        # 上下とも約8%の余白を確保する必要がある高さ
+        # 上下とも約7%の余白を確保する必要がある高さ
         hc_from_height = person_h / (1 - 2 * MARGIN_RATIO)
     else:
-        # 上部のみ約8%の余白を確保しつつ、人物の見えている範囲(y1〜y2)を
+        # 上部のみ約7%の余白を確保しつつ、人物の見えている範囲(y1〜y2)を
         # 必ず収める高さ(下側は余白なしでちょうど収まる想定)
         hc_from_height = person_h / (1 - MARGIN_RATIO)
 
@@ -402,7 +402,7 @@ def compute_crop(info):
     Wc = max(wc_from_width, wc_from_height)
 
     # 中央配置の基準(鼻など)が人物のバウンディングボックス中心とズレている場合、
-    # そのズレを考慮しても左右とも人物が切れず、かつ約8%以上の余白を確保できる幅を保証する
+    # そのズレを考慮しても左右とも人物が切れず、かつ約7%以上の余白を確保できる幅を保証する
     half_needed = max(x2 - cx, cx - x1) / (1 - MARGIN_RATIO)
     Wc = max(Wc, 2 * half_needed)
 
