@@ -251,6 +251,143 @@ def get_exif_orientation(pil_img):
     return o
 
 
+def person_box(lm, W, H):
+    """1人分のバウンディングボックス(px、表示向き座標)と全身判定を求める。
+
+    analyze_image() から呼ばれるほか、評価ツール(evaluate_crop.py)が
+    キャッシュしたランドマークから同じ計算を再現するためにも使う。
+    ロジックを二重に持たないよう、モジュールレベルの関数として公開している。
+    """
+    def px(idx):
+        p = lm[idx]
+        return p.x * W, p.y * H, p.visibility
+
+    def raw(idx):
+        p = lm[idx]
+        # presence属性が無い環境向けのフォールバック
+        presence = getattr(p, "presence", 1.0)
+        return p.x, p.y, p.visibility, presence
+
+    def confidently_in_frame(idx, vis_th, pres_th, tol):
+        x, y, v, pr = raw(idx)
+        return (
+            v >= vis_th
+            and pr >= pres_th
+            and -tol <= x <= 1.0 + tol
+            and -tol <= y <= 1.0 + tol
+        )
+
+    visible_pts = []
+    for idx in ALL_LANDMARKS:
+        x, y, v = px(idx)
+        if v >= VISIBILITY_THRESHOLD:
+            visible_pts.append((x, y))
+
+    if not visible_pts:
+        return None
+
+    xs = [p[0] for p in visible_pts]
+    ys = [p[1] for p in visible_pts]
+
+    x1 = min(xs)
+    x2 = max(xs)
+
+    head_ys = [px(idx)[1] for idx in HEAD_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
+    shoulder_pts = [px(idx) for idx in SHOULDER_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
+
+    if head_ys:
+        top_head_y = min(head_ys)
+        if len(shoulder_pts) == 2:
+            shoulder_width = abs(shoulder_pts[0][0] - shoulder_pts[1][0])
+        else:
+            shoulder_width = (x2 - x1) * 0.6
+        y1 = top_head_y - shoulder_width * HEAD_PAD_FACTOR
+    else:
+        y1 = min(ys)
+
+    # 全身判定: 「(左右どちらかの)足首」と「(左右どちらかの)膝」の両方が、
+    # 高いvisibility/presenceかつ画像枠内に収まっている場合のみ全身とみなす。
+    # 足首だけを見ると、実際は画面外にある足を推測して高スコアを出すことがあるため、
+    # 膝も条件に含めることで誤検出を減らす。
+    def landmark_ok(idx):
+        return confidently_in_frame(
+            idx, FULL_BODY_VIS_THRESHOLD, FULL_BODY_PRESENCE_THRESHOLD, FULL_BODY_FRAME_TOLERANCE
+        )
+
+    ankle_ok = landmark_ok(LEFT_ANKLE) or landmark_ok(RIGHT_ANKLE)
+    knee_ok = landmark_ok(LEFT_KNEE) or landmark_ok(RIGHT_KNEE)
+    full_body = ankle_ok and knee_ok
+
+    if full_body:
+        foot_candidates = [LEFT_ANKLE, RIGHT_ANKLE, LEFT_HEEL, RIGHT_HEEL, LEFT_FOOT_INDEX, RIGHT_FOOT_INDEX]
+        foot_ys = [
+            px(idx)[1] for idx in foot_candidates
+            if confidently_in_frame(idx, FULL_BODY_VIS_THRESHOLD, FULL_BODY_PRESENCE_THRESHOLD, FULL_BODY_FRAME_TOLERANCE)
+        ]
+        if not foot_ys:
+            # 念のためのフォールバック(理論上ankle_okがTrueなら空にならないはず)
+            foot_ys = [px(idx)[1] for idx in [LEFT_ANKLE, RIGHT_ANKLE] if landmark_ok(idx)]
+        bottom_y = max(foot_ys)
+        person_h_est = bottom_y - y1
+        bottom_y += person_h_est * FOOT_PAD_RATIO
+        y2 = bottom_y
+    else:
+        # 全身でない場合: 「もっとアップ」な半身ポートレート風のクロップにするため、
+        # 腰(ヒップ)のランドマークが見えていればそこを下端の目安にする。
+        # (脚やスカートが写っていても、そこまでは含めない)
+        # ヒップが見えていない場合(バストアップのみの写真等)は、
+        # 実際に見えている範囲(max(ys))をそのまま使う。
+        hip_ys = [px(idx)[1] for idx in HIP_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
+        visible_bottom = max(ys)
+        if hip_ys:
+            hip_y = max(hip_ys)  # 両ヒップのうち低い(y値が大きい)方
+            y2 = min(hip_y, visible_bottom)
+        else:
+            y2 = visible_bottom
+
+        # 横幅(x1,x2)も、採用した縦範囲(y1〜y2)内にあるランドマークだけで
+        # 再計算する(脚や手など、クロップ範囲外の点に幅を引っ張られないようにする)
+        pts_in_range = [(x, y) for (x, y) in visible_pts if y <= y2 + 1e-6]
+        if pts_in_range:
+            xs_in_range = [p[0] for p in pts_in_range]
+            x1 = min(xs_in_range)
+            x2 = max(xs_in_range)
+
+    y1 = max(0.0, y1)
+    y2 = min(float(H), y2)
+    x1 = max(0.0, x1)
+    x2 = min(float(W), x2)
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "full_body": full_body}
+
+
+def combine_person_boxes(boxes, W, H):
+    """複数人分のバウンディングボックスを統合し、クロップ計算用の情報を返す。
+
+    背景に小さく写り込んだ人物まで含めると構図が破綻するため、最も大きい人物に
+    対して高さが MIN_PERSON_HEIGHT_RATIO 未満のものは除外する。
+    """
+    boxes = [b for b in boxes if b is not None]
+    if not boxes:
+        return None
+    tallest = max(b["y2"] - b["y1"] for b in boxes)
+    boxes = [b for b in boxes if (b["y2"] - b["y1"]) >= tallest * MIN_PERSON_HEIGHT_RATIO]
+
+    x1 = min(b["x1"] for b in boxes)
+    x2 = max(b["x2"] for b in boxes)
+    y1 = min(b["y1"] for b in boxes)
+    y2 = max(b["y2"] for b in boxes)
+    return {
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2, "W": W, "H": H,
+        # 1人でも全身が写っていれば全身写真として扱う(足元が切れないことを優先)
+        "full_body": any(b["full_body"] for b in boxes),
+        "center_x": (x1 + x2) / 2.0,
+        "n_persons": len(boxes),
+    }
+
+
 def analyze_image(path, landmarker):
     """画像を解析し、人物のバウンディングボックス(px、表示向き座標)と全身判定を返す。
 
@@ -272,129 +409,13 @@ def analyze_image(path, landmarker):
         return None
     lm = poses[0]  # 最も信頼度の高い1人(視線推定などの基準に使う)
 
-    def person_box(lm):
-        """1人分のバウンディングボックス(px)と全身判定を求める。"""
-        def px(idx):
-            p = lm[idx]
-            return p.x * W, p.y * H, p.visibility
-
-        def raw(idx):
-            p = lm[idx]
-            # presence属性が無い環境向けのフォールバック
-            presence = getattr(p, "presence", 1.0)
-            return p.x, p.y, p.visibility, presence
-
-        def confidently_in_frame(idx, vis_th, pres_th, tol):
-            x, y, v, pr = raw(idx)
-            return (
-                v >= vis_th
-                and pr >= pres_th
-                and -tol <= x <= 1.0 + tol
-                and -tol <= y <= 1.0 + tol
-            )
-
-        visible_pts = []
-        for idx in ALL_LANDMARKS:
-            x, y, v = px(idx)
-            if v >= VISIBILITY_THRESHOLD:
-                visible_pts.append((x, y))
-
-        if not visible_pts:
-            return None
-
-        xs = [p[0] for p in visible_pts]
-        ys = [p[1] for p in visible_pts]
-
-        x1 = min(xs)
-        x2 = max(xs)
-
-        head_ys = [px(idx)[1] for idx in HEAD_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
-        shoulder_pts = [px(idx) for idx in SHOULDER_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
-
-        if head_ys:
-            top_head_y = min(head_ys)
-            if len(shoulder_pts) == 2:
-                shoulder_width = abs(shoulder_pts[0][0] - shoulder_pts[1][0])
-            else:
-                shoulder_width = (x2 - x1) * 0.6
-            y1 = top_head_y - shoulder_width * HEAD_PAD_FACTOR
-        else:
-            y1 = min(ys)
-
-        # 全身判定: 「(左右どちらかの)足首」と「(左右どちらかの)膝」の両方が、
-        # 高いvisibility/presenceかつ画像枠内に収まっている場合のみ全身とみなす。
-        # 足首だけを見ると、実際は画面外にある足を推測して高スコアを出すことがあるため、
-        # 膝も条件に含めることで誤検出を減らす。
-        def landmark_ok(idx):
-            return confidently_in_frame(
-                idx, FULL_BODY_VIS_THRESHOLD, FULL_BODY_PRESENCE_THRESHOLD, FULL_BODY_FRAME_TOLERANCE
-            )
-
-        ankle_ok = landmark_ok(LEFT_ANKLE) or landmark_ok(RIGHT_ANKLE)
-        knee_ok = landmark_ok(LEFT_KNEE) or landmark_ok(RIGHT_KNEE)
-        full_body = ankle_ok and knee_ok
-
-        if full_body:
-            foot_candidates = [LEFT_ANKLE, RIGHT_ANKLE, LEFT_HEEL, RIGHT_HEEL, LEFT_FOOT_INDEX, RIGHT_FOOT_INDEX]
-            foot_ys = [
-                px(idx)[1] for idx in foot_candidates
-                if confidently_in_frame(idx, FULL_BODY_VIS_THRESHOLD, FULL_BODY_PRESENCE_THRESHOLD, FULL_BODY_FRAME_TOLERANCE)
-            ]
-            if not foot_ys:
-                # 念のためのフォールバック(理論上ankle_okがTrueなら空にならないはず)
-                foot_ys = [px(idx)[1] for idx in [LEFT_ANKLE, RIGHT_ANKLE] if landmark_ok(idx)]
-            bottom_y = max(foot_ys)
-            person_h_est = bottom_y - y1
-            bottom_y += person_h_est * FOOT_PAD_RATIO
-            y2 = bottom_y
-        else:
-            # 全身でない場合: 「もっとアップ」な半身ポートレート風のクロップにするため、
-            # 腰(ヒップ)のランドマークが見えていればそこを下端の目安にする。
-            # (脚やスカートが写っていても、そこまでは含めない)
-            # ヒップが見えていない場合(バストアップのみの写真等)は、
-            # 実際に見えている範囲(max(ys))をそのまま使う。
-            hip_ys = [px(idx)[1] for idx in HIP_LANDMARKS if px(idx)[2] >= VISIBILITY_THRESHOLD]
-            visible_bottom = max(ys)
-            if hip_ys:
-                hip_y = max(hip_ys)  # 両ヒップのうち低い(y値が大きい)方
-                y2 = min(hip_y, visible_bottom)
-            else:
-                y2 = visible_bottom
-
-            # 横幅(x1,x2)も、採用した縦範囲(y1〜y2)内にあるランドマークだけで
-            # 再計算する(脚や手など、クロップ範囲外の点に幅を引っ張られないようにする)
-            pts_in_range = [(x, y) for (x, y) in visible_pts if y <= y2 + 1e-6]
-            if pts_in_range:
-                xs_in_range = [p[0] for p in pts_in_range]
-                x1 = min(xs_in_range)
-                x2 = max(xs_in_range)
-
-        y1 = max(0.0, y1)
-        y2 = min(float(H), y2)
-        x1 = max(0.0, x1)
-        x2 = min(float(W), x2)
-
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "full_body": full_body}
-
     # 複数人が写っている場合は、全員を収めるようバウンディングボックスを統合する。
-    boxes = [b for b in (person_box(p) for p in poses) if b is not None]
-    if not boxes:
+    combined = combine_person_boxes([person_box(p, W, H) for p in poses], W, H)
+    if combined is None:
         return None
-
-    # 背景に小さく写り込んだ人物まで含めると構図が破綻するため、
-    # 最も大きい人物に対して極端に小さいものは除外する。
-    tallest = max(b["y2"] - b["y1"] for b in boxes)
-    boxes = [b for b in boxes if (b["y2"] - b["y1"]) >= tallest * MIN_PERSON_HEIGHT_RATIO]
-
-    x1 = min(b["x1"] for b in boxes)
-    x2 = max(b["x2"] for b in boxes)
-    y1 = min(b["y1"] for b in boxes)
-    y2 = max(b["y2"] for b in boxes)
-    # 1人でも全身が写っていれば全身写真として扱う(足元が切れないことを優先)
-    full_body = any(b["full_body"] for b in boxes)
-    n_persons = len(boxes)
+    x1, y1, x2, y2 = combined["x1"], combined["y1"], combined["x2"], combined["y2"]
+    full_body = combined["full_body"]
+    n_persons = combined["n_persons"]
 
     # 水平方向の中央位置の基準: 人物全体(バウンディングボックス)の中心。
     # 以前は鼻の位置を基準にしていたが、人物が斜め・横向きだと鼻が体の中心から

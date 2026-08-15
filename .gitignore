@@ -26,3 +26,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 評価ツールの検出キャッシュ
+eval_cache.pkl
