@@ -266,39 +266,45 @@ LrTasks.startAsyncTask(function()
                 end)
                 if ok then
                     applied = applied + 1
-                    -- 念のため書き込み直後に読み戻して確認する。
-                    -- (適用先の写真自体が誤っていると、この検証は一致してしまい
-                    --  問題を検出できないため、あくまで補助的なチェック)
-                    local readOk, current = LrTasks.pcall(function()
-                        return job.photo:getDevelopSettings()
-                    end)
-                    if readOk and current then
-                        local gotLeft = current.CropLeft or 0
-                        local gotTop = current.CropTop or 0
-                        local gotRight = current.CropRight or 1
-                        local gotBottom = current.CropBottom or 1
-                        local mismatch = math.abs(gotLeft - job.CropLeft) > 0.001
-                            or math.abs(gotTop - job.CropTop) > 0.001
-                            or math.abs(gotRight - job.CropRight) > 0.001
-                            or math.abs(gotBottom - job.CropBottom) > 0.001
-                        if mismatch then
-                            notPersisted = notPersisted + 1
-                            log:warnf(
-                                "%s: applyDevelopSettings did not persist (immediate readback). " ..
-                                "wanted L=%.4f T=%.4f R=%.4f B=%.4f / got L=%.4f T=%.4f R=%.4f B=%.4f",
-                                job.filename, job.CropLeft, job.CropTop, job.CropRight, job.CropBottom,
-                                gotLeft, gotTop, gotRight, gotBottom
-                            )
-                        end
-                    else
-                        log:warn(job.filename .. ": getDevelopSettings readback failed: " .. tostring(current))
-                    end
                 else
                     errors = errors + 1
                     log:error("Failed to apply crop for " .. job.filename .. ": " .. tostring(err))
                 end
             end
         end)
+    end)
+
+    -- 反映確認は書き込みトランザクションの「外」で行う。
+    -- withWriteAccessDo の内側で getDevelopSettings() を呼んでも、まだ確定していない
+    -- 変更は見えず初期値(0,0,1,1)が返るため、実際には正しく適用されていても
+    -- 「反映されていない」と誤判定してしまう。
+    LrTasks.pcall(function()
+        for _, job in ipairs(jobs) do
+            local readOk, current = LrTasks.pcall(function()
+                return job.photo:getDevelopSettings()
+            end)
+            if readOk and current then
+                local gotLeft = current.CropLeft or 0
+                local gotTop = current.CropTop or 0
+                local gotRight = current.CropRight or 1
+                local gotBottom = current.CropBottom or 1
+                local mismatch = math.abs(gotLeft - job.CropLeft) > 0.001
+                    or math.abs(gotTop - job.CropTop) > 0.001
+                    or math.abs(gotRight - job.CropRight) > 0.001
+                    or math.abs(gotBottom - job.CropBottom) > 0.001
+                if mismatch then
+                    notPersisted = notPersisted + 1
+                    log:warnf(
+                        "%s: crop not reflected in catalog. " ..
+                        "wanted L=%.4f T=%.4f R=%.4f B=%.4f / got L=%.4f T=%.4f R=%.4f B=%.4f",
+                        job.filename, job.CropLeft, job.CropTop, job.CropRight, job.CropBottom,
+                        gotLeft, gotTop, gotRight, gotBottom
+                    )
+                end
+            else
+                log:warn(job.filename .. ": getDevelopSettings readback failed: " .. tostring(current))
+            end
+        end
     end)
 
     local msg = string.format(
