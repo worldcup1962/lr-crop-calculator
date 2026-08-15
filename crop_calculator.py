@@ -15,9 +15,9 @@ crop_calculator.py
                   無い場合はヒューリスティックにフォールバックする。
 
   promo           宣材写真用の従来ロジック(固定ルール)。
-                  - 人物(鼻の位置)を水平方向中央に配置
-                  - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約7%確保
-                  - 全身写真の場合: 人物が切れないよう上下に約7%の余白を確保
+                  - 人物全体(バウンディングボックスの中心)を水平方向中央に配置
+                  - 全身写真でない場合: 上部の余分な余白を削除しつつ、上部余白を約8%確保
+                  - 全身写真の場合: 人物が切れないよう上下に約8%の余白を確保
 
 【EXIF Orientation対応】
 Lightroom(Adobe Camera Raw)の crs:CropTop/Left/Right/Bottom は、
@@ -32,7 +32,7 @@ EXIFのOrientationタグによる回転を適用する"前"の、保存時のピ
      保存時の座標系に変換してからCSVに出力する
 
 MediaPipe Tasks API (PoseLandmarker) を使用します。
-初回実行時にポーズ検出モデル(.task ファイル、約30MB)を自動ダウンロードします。
+初回実行時にポーズ検出モデル(.task ファイル、約9MB)を自動ダウンロードします。
 インターネット接続が必要です。
 
 使い方:
@@ -62,7 +62,14 @@ from mediapipe.tasks.python import vision as mp_vision
 # ----------------------------------------------------------------------
 # 調整可能パラメータ
 # ----------------------------------------------------------------------
-MARGIN_RATIO = 0.07          # 目標とする余白の割合(上下左右共通のベース値)
+MARGIN_RATIO = 0.08          # 目標とする余白の割合(上下左右共通のベース値)
+# 人物が画像の端に寄っていると、中央配置したクロップ枠が画像からはみ出す。
+# その場合は枠を詰めれば中央に寄せられるが、余白は MARGIN_RATIO より狭くなる。
+# ここで指定した余白を確保できる範囲でのみ枠を詰める(0.0にすると、人物に接する
+# ぎりぎりまで詰めて中央配置を最優先する)。
+# バウンディングボックスはランドマーク基準で、髪や衣服は実際にはその外側に
+# はみ出すため、0.0ではなく多少の余白を残している。
+CENTER_SHRINK_MIN_MARGIN = 0.02
 VISIBILITY_THRESHOLD = 0.5   # ランドマークを「見えている」とみなす信頼度の閾値
 HEAD_PAD_FACTOR = 0.55       # 目・耳のランドマークから頭頂部を推定する際の係数(肩幅に対する比率)
 FOOT_PAD_RATIO = 0.02        # 足元(全身時)にわずかに足す余白(人物身長に対する比率)
@@ -348,19 +355,6 @@ def analyze_image(path, landmarker):
             x1 = min(xs_in_range)
             x2 = max(xs_in_range)
 
-    # 水平方向の中央位置の基準: 鼻を最優先し、見えない場合は目→肩→バウンディングボックス中心の順にフォールバック
-    nose_x, nose_v = px(NOSE)[0], px(NOSE)[2]
-    if nose_v >= VISIBILITY_THRESHOLD:
-        center_x = nose_x
-    else:
-        eye_pts = [px(idx) for idx in (LEFT_EYE, RIGHT_EYE) if px(idx)[2] >= VISIBILITY_THRESHOLD]
-        if eye_pts:
-            center_x = sum(p[0] for p in eye_pts) / len(eye_pts)
-        elif len(shoulder_pts) == 2:
-            center_x = (shoulder_pts[0][0] + shoulder_pts[1][0]) / 2.0
-        else:
-            center_x = (x1 + x2) / 2.0
-
     y1 = max(0.0, y1)
     y2 = min(float(H), y2)
     x1 = max(0.0, x1)
@@ -369,12 +363,36 @@ def analyze_image(path, landmarker):
     if x2 <= x1 or y2 <= y1:
         return None
 
+    # 水平方向の中央位置の基準: 人物全体(バウンディングボックス)の中心。
+    # 以前は鼻の位置を基準にしていたが、人物が斜め・横向きだと鼻が体の中心から
+    # ずれるため、体全体が左右どちらかに偏って見えてしまう(実測で最大±18%)。
+    center_x = (x1 + x2) / 2.0
+
     return {
         "x1": x1, "y1": y1, "x2": x2, "y2": y2, "W": W, "H": H,
         "full_body": full_body, "center_x": center_x,
         "orientation": orientation, "raw_W": raw_W, "raw_H": raw_H,
         "disp_img": disp_img, "landmarks": lm, "detect_stage": detect_stage,
     }
+
+
+def _clamp_keeping(value, max_start, keep_lo, keep_hi):
+    """クロップ枠の開始位置を画像内に収めつつ、人物が枠から外れないよう制限する。
+
+    value    : 望ましい開始位置(左端 or 上端)
+    max_start: 画像内に収まる開始位置の上限(W - Wc や H - Hc)
+    keep_lo  : 人物の終端が枠内に収まるための開始位置の下限(x2 - Wc など)
+    keep_hi  : 人物の始端が枠内に収まるための開始位置の上限(x1 など)
+
+    単純に [0, max_start] へ丸めるだけだと、人物が画像の端に寄っている場合に
+    人物がフレームから外れることがある。そのため人物を保持できる範囲
+    [keep_lo, keep_hi] も考慮する(両立しない場合は画像内に収めることを優先)。
+    """
+    lo = max(0.0, keep_lo)
+    hi = min(max_start, keep_hi)
+    if lo <= hi:
+        return min(max(value, lo), hi)
+    return max(0.0, min(value, max_start))
 
 
 def compute_crop(info):
@@ -390,10 +408,10 @@ def compute_crop(info):
     wc_from_width = person_w / (1 - 2 * MARGIN_RATIO)
 
     if info["full_body"]:
-        # 上下とも約7%の余白を確保する必要がある高さ
+        # 上下とも約8%の余白を確保する必要がある高さ
         hc_from_height = person_h / (1 - 2 * MARGIN_RATIO)
     else:
-        # 上部のみ約7%の余白を確保しつつ、人物の見えている範囲(y1〜y2)を
+        # 上部のみ約8%の余白を確保しつつ、人物の見えている範囲(y1〜y2)を
         # 必ず収める高さ(下側は余白なしでちょうど収まる想定)
         hc_from_height = person_h / (1 - MARGIN_RATIO)
 
@@ -401,19 +419,33 @@ def compute_crop(info):
     # 人物が絶対に切れないよう、横幅基準・高さ基準のうち大きい方を採用
     Wc = max(wc_from_width, wc_from_height)
 
-    # 中央配置の基準(鼻など)が人物のバウンディングボックス中心とズレている場合、
-    # そのズレを考慮しても左右とも人物が切れず、かつ約7%以上の余白を確保できる幅を保証する
-    half_needed = max(x2 - cx, cx - x1) / (1 - MARGIN_RATIO)
-    Wc = max(Wc, 2 * half_needed)
-
     Wc = min(Wc, W)
     Hc = Wc / aspect
     if Hc > H:
         Hc = H
         Wc = Hc * aspect
 
+    # 人物を水平中央に配置する。
+    # 人物が画像の端に寄っていると、中央に置いたクロップ枠が画像からはみ出す。
+    # その場合は枠を詰めれば中央配置できるが、アスペクト比固定のため幅を詰めると
+    # 高さも同率で縮み、頭や足が縦に切れることがある。
+    # そこで「人物が切れないこと」を優先し、切れない範囲でのみ枠を詰めて中央に寄せる。
+    max_centered_w = 2.0 * min(cx, W - cx)   # 中央を保ったまま画像内に収まる最大幅
+    if max_centered_w < Wc:
+        shrunk_h = max_centered_w / aspect
+        # 枠を詰めるのは、詰めたあとも CENTER_SHRINK_MIN_MARGIN の余白を
+        # 確保できる場合のみ(本来の MARGIN_RATIO よりは狭くなる)。
+        m = CENTER_SHRINK_MIN_MARGIN
+        need_w = person_w / (1 - 2 * m)
+        need_h = person_h / (1 - 2 * m) if info["full_body"] else person_h / (1 - m)
+        if max_centered_w >= need_w and shrunk_h >= need_h:
+            Wc = max_centered_w
+            Hc = shrunk_h
+
     left = cx - Wc / 2.0
-    left = max(0.0, min(left, W - Wc))
+    # クランプは、上記で中央配置できなかった場合にのみ効く(人物は中央から
+    # 多少ずれる)。その際も人物が必ずクロップ内に収まる範囲に制限する。
+    left = _clamp_keeping(left, W - Wc, x2 - Wc, x1)
     right = left + Wc
 
     if info["full_body"]:
@@ -421,7 +453,7 @@ def compute_crop(info):
     else:
         top = y1 - MARGIN_RATIO * Hc
 
-    top = max(0.0, min(top, H - Hc))
+    top = _clamp_keeping(top, H - Hc, y2 - Hc, y1)
     bottom = top + Hc
 
     return {
