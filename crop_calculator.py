@@ -426,8 +426,8 @@ def analyze_image(path, landmarker):
         "x1": x1, "y1": y1, "x2": x2, "y2": y2, "W": W, "H": H,
         "full_body": full_body, "center_x": center_x,
         "orientation": orientation, "raw_W": raw_W, "raw_H": raw_H,
-        "disp_img": disp_img, "landmarks": lm, "detect_stage": detect_stage,
-        "n_persons": n_persons,
+        "disp_img": disp_img, "landmarks": lm, "poses": poses,
+        "detect_stage": detect_stage, "n_persons": n_persons,
     }
 
 
@@ -618,6 +618,12 @@ def main():
              " promo: 宣材写真用ロジック(人物を水平中央に配置する従来の固定ルール)",
     )
     parser.add_argument(
+        "--refine-model", default=None,
+        help="promo モードのクロップを手動クロップ実績で微調整するモデル"
+             " (train_promo_refine.py の出力)。省略時はスクリプトと同じフォルダの"
+             " promo_refine_model.pkl を探し、無ければ微調整せず従来どおり動作する。",
+    )
+    parser.add_argument(
         "--no-detect-fallback", action="store_true",
         help="人物検出に失敗した場合の再試行(縮小・コントラスト強調・閾値緩和)を行わない",
     )
@@ -627,6 +633,20 @@ def main():
              " 未指定/未学習の場合はヒューリスティックにフォールバックする。",
     )
     args = parser.parse_args()
+
+    refine_model = None
+    if args.mode == "promo":
+        import promo_refine
+        refine_path = args.refine_model or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "promo_refine_model.pkl"
+        )
+        refine_model = promo_refine.load_model(refine_path)
+        if refine_model is None:
+            if args.refine_model:
+                print(f"[promo] 微調整モデルが見つかりません({refine_path})。微調整なしで実行します。")
+        else:
+            print(f"[promo] 微調整モデルを読み込みました: {refine_path}"
+                  f" (学習データ {refine_model.get('n_samples', '?')}枚)")
 
     general_model = None
     if args.mode == "general":
@@ -679,6 +699,8 @@ def main():
                 crop_display, _features, _margins = general_crop.compute_crop_general(info, general_model)
             else:
                 crop_display = compute_crop(info)
+                if refine_model is not None:
+                    crop_display = promo_refine.refine(crop_display, info, refine_model)
             crop_raw = display_crop_to_raw(crop_display, info["orientation"])
             rows.append({
                 "filename": filename,

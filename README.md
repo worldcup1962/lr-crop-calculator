@@ -31,6 +31,9 @@ lr-crop-calculator/
 ├── crop_calculator.py          ... 画像を解析してクロップ情報CSVを生成するメインスクリプト
 ├── general_crop.py             ... generalモードの特徴量抽出・クロップ計算ロジック
 ├── train_general_crop_model.py ... 手動トリミング実績からgeneralモード用モデルを学習する
+├── promo_refine.py             ... promoモードの結果を手動クロップ実績で微調整するロジック
+├── train_promo_refine.py       ... promo微調整モデルを学習する
+├── evaluate_crop.py            ... 手動クロップ実績に対する精度を測定・交差検証する
 ├── debug_single.py             ... 1枚の画像を詳細診断するデバッグ用スクリプト
 ├── requirements.txt            ... 依存パッケージ
 ├── LICENSE                     ... MITライセンス
@@ -71,6 +74,7 @@ python crop_calculator.py --input /path/to/jpg_folder --output crop_data.csv
 | `--recursive` | サブフォルダも再帰的に処理する |
 | `--mode` | `general`(既定)または `promo` |
 | `--model` | generalモード用の学習済みモデル。省略時はスクリプトと同じフォルダの `general_crop_model.pkl` を探す |
+| `--refine-model` | promoモードの微調整モデル。省略時は `promo_refine_model.pkl` を探す([詳細](#手動クロップ実績による微調整promo)) |
 | `--no-detect-fallback` | 人物検出の再試行を無効にする([詳細](#人物検出のフォールバック)) |
 
 ```bash
@@ -246,6 +250,57 @@ python crop_calculator.py --input /path/to/jpg_folder --output crop_data.csv
 パラメータは `crop_calculator.py` 冒頭の定数で調整できます(余白率は `MARGIN_RATIO = 0.10`)。
 検出精度に納得できない場合は `VISIBILITY_THRESHOLD` や `HEAD_PAD_FACTOR` を数枚のサンプルで
 試しながら調整することをおすすめします。
+
+複数人が写っている場合は、検出した全員(最大 `MAX_PERSONS` 人)のバウンディングボックスを
+統合してから上記のロジックを適用します。背景に小さく写り込んだ人物で構図が破綻しないよう、
+最も大きい人物に対して高さが `MIN_PERSON_HEIGHT_RATIO` 未満の人物は除外します。
+
+### 手動クロップ実績による微調整(promo)
+
+固定ルールだけでは、半身写真や複数人写真で「写真ごとの判断」が残ります。手動クロップ実績が
+あれば、その差分を学習して自動的に補正できます。
+
+```bash
+pip install scikit-learn
+python train_promo_refine.py --crop-csv hand_crop.csv --cross-validate
+```
+
+`promo_refine_model.pkl` がスクリプトと同じフォルダにあれば、`--mode promo` 実行時に
+自動的に使われます(無い場合は従来どおり固定ルールのみで動作します)。
+
+実測での改善幅(手動クロップ789枚、5分割交差検証):
+
+| 区分 | 枚数 | 微調整なし | 微調整あり |
+|---|---|---|---|
+| 全体 | 789 | 0.9098 | **0.9367** |
+| 全身 | 366 | 0.9572 | 0.9626 |
+| 半身 | 423 | 0.8689 | **0.9142** |
+| 複数人 | 22 | 0.7405 | **0.8623** |
+
+仕組みの要点:
+
+- クロップ枠をゼロから予測するのではなく、**promoの結果からのズレ(差分)だけ**を学習します。
+  予測すべき量が小さく精度を出しやすいうえ、モデルが外しても promo の結果から大きく離れません
+- 予測するのは「中心の水平ズレ / 中心の垂直ズレ / 拡大率」の**3つだけ**です。4辺を独立に
+  予測するとアスペクト比固定の制約が壊れるため、枠を一意に決められる最小の組にしています
+- 予測後も人物が切れないよう調整されるため、**微調整によって人物が切れることはありません**
+
+### 精度の測定と検証
+
+`evaluate_crop.py` で、手動クロップ実績に対する精度を測定できます。
+
+```bash
+# 現状の精度(全身/半身/複数人の区分別、中央値・下位10%・最小も表示)
+python evaluate_crop.py --crop-csv hand_crop.csv --worst 10
+
+# 定数の最適値を探し、過学習でないか交差検証する
+python evaluate_crop.py --crop-csv hand_crop.csv --cross-validate     --sweep MARGIN_RATIO=0.09,0.10,0.11
+```
+
+連番ブロック単位で分割して交差検証します。連続する写真は同じ衣装・セットアップでほぼ同一
+構図になるため、ランダム分割では学習側と評価側に実質同じ写真が入り、検証になりません。
+
+人物検出の結果はキャッシュされるので、2回目以降のパラメータ掃引は一瞬で終わります。
 
 ---
 
