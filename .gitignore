@@ -4,10 +4,12 @@ pose_landmarker_full.task
 # 学習済みモデル(train_general_crop_model.py で再生成できる)
 *.pkl
 
-# 生成物・検証用データ(元画像の絶対パスや個人の写真情報を含むため)
+# 生成物・検証用データ(元画像の絶対パスや撮影日などを含むため、公開リポジトリには入れない)
 crop_data.csv
 export_crop.csv
 verify*.csv
+hand_crop*.csv
+*_crop_history.csv
 debug_out.jpg
 debug_*.jpg
 
