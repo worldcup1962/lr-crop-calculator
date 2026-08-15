@@ -81,8 +81,10 @@ FOOT_PAD_RATIO = 0.03        # 足元(全身時)にわずかに足す余白(人�
 # その推測値のvisibilityスコアが中程度でも閾値を超えてしまうことがある。
 # そのため通常のVISIBILITY_THRESHOLDより厳しい基準を使い、かつ
 # 「正規化座標が実際に画像の枠内(0.0〜1.0)に収まっているか」もあわせてチェックする。
-FULL_BODY_VIS_THRESHOLD = 0.7       # 足首・膝の visibility がこれ以上
-FULL_BODY_PRESENCE_THRESHOLD = 0.7  # 足首・膝の presence(画像内に実在する確信度)がこれ以上
+# 手動クロップ実績789枚との比較では、閾値を0.7から下げても枠内チェックが効くため
+# 誤検出は増えず、わずかに一致度が上がった(0.7:0.9035 -> 0.5:0.9069、改善6枚/悪化2枚)。
+FULL_BODY_VIS_THRESHOLD = 0.5       # 足首・膝の visibility がこれ以上
+FULL_BODY_PRESENCE_THRESHOLD = 0.5  # 足首・膝の presence(画像内に実在する確信度)がこれ以上
 FULL_BODY_FRAME_TOLERANCE = 0.0     # 正規化座標がこの許容誤差を超えて枠外ならNG(0.0=枠内必須)
 
 # フォールバック検出時の妥当性チェック: 見えているランドマークがこの数未満なら
