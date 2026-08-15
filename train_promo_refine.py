@@ -55,7 +55,8 @@ def build_dataset(items):
         Y.append(target)
         base.append(base_crop)
         hand.append(it["hand"])
-        meta.append({"seq": it["seq"], "info": info, "filename": it["filename"]})
+        meta.append({"seq": it["seq"], "day": it.get("day"), "info": info,
+                     "filename": it["filename"]})
     return np.array(X), np.array(Y), base, hand, meta
 
 
@@ -69,10 +70,21 @@ def fit_models(X, Y, make_regressor):
     return {name: make_regressor().fit(X, Y[:, j]) for j, name in enumerate(TARGETS)}
 
 
-def cross_validate(X, Y, base, hand, meta, make_regressor, folds, block_size):
-    """ブロック単位の交差検証で、実際の改善幅を測る。"""
-    blocks = np.array([m["seq"] // block_size for m in meta])
-    unique = sorted(set(blocks.tolist()))
+def cross_validate(X, Y, base, hand, meta, make_regressor, folds, block_size, group_by="auto"):
+    """グループ単位の交差検証で、実際の改善幅を測る。
+
+    撮影日が2つ以上あれば撮影日ごとに分割する。「学習していない別の撮影日に
+    通用するか」を見る、実運用に最も近い検証になる。
+    """
+    days = {m.get("day") for m in meta}
+    if group_by == "auto":
+        group_by = "day" if len(days) >= 2 else "block"
+    if group_by == "day":
+        blocks = np.array([m.get("day") for m in meta])
+    else:
+        blocks = np.array([m["seq"] // block_size for m in meta])
+    unique = sorted(set(blocks.tolist()), key=str)
+    folds = min(folds, len(unique))
     before, after = [], []
     per_class = {"全身": ([], []), "半身": ([], []), "複数人": ([], [])}
 
@@ -100,7 +112,8 @@ def cross_validate(X, Y, base, hand, meta, make_regressor, folds, block_size):
                 per_class["複数人"][0].append(b)
                 per_class["複数人"][1].append(a)
 
-    print(f"\n交差検証({folds}分割、ブロックサイズ {block_size}枚)")
+    unit = "撮影日" if group_by == "day" else "ブロック"
+    print(f"\n交差検証({len(unique)}{unit} を {folds}分割)")
     print(f"  全体      {len(before):4d}枚  {statistics.mean(before):.4f} -> "
           f"{statistics.mean(after):.4f}  ({statistics.mean(after) - statistics.mean(before):+.4f})")
     for label, (b, a) in per_class.items():
@@ -115,13 +128,16 @@ def cross_validate(X, Y, base, hand, meta, make_regressor, folds, block_size):
 
 def main():
     ap = argparse.ArgumentParser(description="promoモードのクロップを微調整するモデルを学習")
-    ap.add_argument("--crop-csv", required=True, help="ExportCropHistory.lua が出力したCSV")
+    ap.add_argument("--crop-csv", required=True, nargs="+",
+                    help="ExportCropHistory.lua が出力したCSV(複数指定可)")
     ap.add_argument("--output-model", default="promo_refine_model.pkl")
     ap.add_argument("--cache", default="eval_cache.pkl", help="人物検出結果のキャッシュ")
     ap.add_argument("--refresh-cache", action="store_true")
     ap.add_argument("--cross-validate", action="store_true", help="交差検証で改善幅を確認する")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--block-size", type=int, default=ev.DEFAULT_BLOCK_SIZE)
+    ap.add_argument("--group-by", choices=["auto", "day", "block"], default="auto",
+                    help="交差検証の分割単位(既定: 撮影日が2つ以上あれば撮影日)")
     ap.add_argument("--n-estimators", type=int, default=300)
     ap.add_argument("--max-depth", type=int, default=3)
     ap.add_argument("--learning-rate", type=float, default=0.05)
@@ -148,7 +164,8 @@ def main():
         raise SystemExit("学習に使えるデータが少なすぎます(50枚程度は必要)。")
 
     if args.cross_validate:
-        cross_validate(X, Y, base, hand, meta, make_regressor, args.folds, args.block_size)
+        cross_validate(X, Y, base, hand, meta, make_regressor, args.folds,
+                       args.block_size, args.group_by)
 
     # 最終モデルは全データで学習する
     models = fit_models(X, Y, make_regressor)

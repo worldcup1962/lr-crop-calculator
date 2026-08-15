@@ -43,7 +43,7 @@ from PIL import Image, ImageOps
 
 import crop_calculator as cc
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 # 交差検証で使うブロックの大きさ(連番何枚を1ブロックとみなすか)
 DEFAULT_BLOCK_SIZE = 25
 
@@ -56,18 +56,30 @@ class _Pt:
         self.x, self.y, self.visibility, self.presence = x, y, visibility, presence
 
 
-def load_hand_crops(path):
-    """手動クロップCSVを読み込む。回転クロップは本ツールの対象外なので除外する。"""
+def load_hand_crops(paths):
+    """手動クロップCSVを読み込む(複数ファイル可)。
+
+    回転クロップは本ツールの対象外なので除外する。
+    同じ写真が複数のCSVに含まれていた場合はパスで重複を除く。
+    """
+    if isinstance(paths, str):
+        paths = [paths]
     rows = []
+    seen = set()
     skipped_rotated = 0
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        for r in csv.DictReader(f):
-            if r.get("is_cropped") != "1":
-                continue
-            if abs(float(r.get("CropAngle") or 0)) > 0.01:
-                skipped_rotated += 1
-                continue
-            rows.append(r)
+    for path in paths:
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("is_cropped") != "1":
+                    continue
+                if abs(float(r.get("CropAngle") or 0)) > 0.01:
+                    skipped_rotated += 1
+                    continue
+                key = r.get("path") or r.get("filename")
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(r)
     return rows, skipped_rotated
 
 
@@ -103,6 +115,7 @@ def build_cache(rows, cache_path, refresh=False):
             items.append({
                 "filename": r["filename"],
                 "seq": _seq_of(r["filename"]),
+                "day": os.path.basename(os.path.dirname(r["path"])),
                 "W": W, "H": H,
                 "poses": [[(p.x, p.y, p.visibility, getattr(p, "presence", 1.0)) for p in ps]
                           for ps in poses],
@@ -214,23 +227,37 @@ def sweep(items, name, values):
     return best
 
 
-def blocks_of(items, block_size):
-    """連番をブロックにまとめる。連続する写真は構図が似ているため、
-    ブロックごと学習側/評価側に振り分けないと検証にならない。"""
+def blocks_of(items, block_size, group_by="auto"):
+    """写真をグループにまとめる。グループ単位で学習側/評価側に振り分ける。
+
+    group_by="day"  : 撮影日ごと。学習していない別の撮影日に通用するかを見る、
+                      実運用に最も近い検証。撮影日が2つ以上あるときに使える。
+    group_by="block": 連番ブロックごと。撮影日が1つしかない場合に使う。
+                      連続する写真は同じ衣装・セットアップでほぼ同一構図になるため、
+                      ランダム分割では学習側と評価側に実質同じ写真が入ってしまう。
+    group_by="auto" : 撮影日が2つ以上あれば day、なければ block。
+    """
+    days = {it.get("day") for it in items}
+    if group_by == "auto":
+        group_by = "day" if len(days) >= 2 else "block"
     groups = {}
     for i, it in enumerate(items):
-        groups.setdefault(it["seq"] // block_size, []).append(i)
-    return [sorted(v) for _, v in sorted(groups.items())]
+        key = it.get("day") if group_by == "day" else it["seq"] // block_size
+        groups.setdefault(key, []).append(i)
+    return [sorted(v) for _, v in sorted(groups.items(), key=lambda kv: str(kv[0]))], group_by
 
 
-def cross_validate(items, name, values, block_size, folds):
+def cross_validate(items, name, values, block_size, folds, group_by="auto"):
     """ブロック単位のk分割交差検証。
 
     各分割で「学習側だけで最適値を決め」「評価側で測る」ことで、
     調整に使っていないデータに対する性能を見る。
     """
-    bl = blocks_of(items, block_size)
-    print(f"\n交差検証: {len(bl)}ブロック を {folds}分割 (ブロックサイズ {block_size}枚)")
+    bl, used = blocks_of(items, block_size, group_by)
+    folds = min(folds, len(bl))
+    unit = "撮影日" if used == "day" else "ブロック"
+    print(f"\n交差検証: {len(bl)}{unit} を {folds}分割"
+          + ("" if used == "day" else f" (ブロックサイズ {block_size}枚)"))
     original = getattr(cc, name)
     tuned_scores, fixed_scores, picked = [], [], []
     try:
@@ -274,19 +301,27 @@ def cross_validate(items, name, values, block_size, folds):
 
 def main():
     ap = argparse.ArgumentParser(description="手動クロップ実績に対する自動クロップの精度を検証")
-    ap.add_argument("--crop-csv", required=True, help="ExportCropHistory.lua が出力したCSV")
+    ap.add_argument("--crop-csv", required=True, nargs="+",
+                    help="ExportCropHistory.lua が出力したCSV(複数指定可)")
     ap.add_argument("--cache", default="eval_cache.pkl", help="人物検出結果のキャッシュ")
     ap.add_argument("--refresh-cache", action="store_true", help="キャッシュを作り直す")
     ap.add_argument("--sweep", help="掃引する定数。例: MARGIN_RATIO=0.08,0.09,0.10")
     ap.add_argument("--cross-validate", action="store_true", help="ブロック単位の交差検証を行う")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
+    ap.add_argument("--group-by", choices=["auto", "day", "block"], default="auto",
+                    help="交差検証の分割単位(既定: 撮影日が2つ以上あれば撮影日)")
     ap.add_argument("--worst", type=int, default=0, help="一致度が低い写真を上位N件表示する")
     args = ap.parse_args()
 
     rows, rotated = load_hand_crops(args.crop_csv)
     print(f"手動クロップ: {len(rows)}枚 (回転クロップ {rotated}枚は対象外)")
     items = build_cache(rows, args.cache, args.refresh_cache)
+    days = sorted({it.get("day") for it in items})
+    if len(days) > 1:
+        import collections as _c
+        counts = _c.Counter(it.get("day") for it in items)
+        print("撮影日: " + " / ".join(f"{d} {counts[d]}枚" for d in days))
 
     print()
     print("=== 現在の設定での精度 ===")
@@ -305,7 +340,7 @@ def main():
         name, values = parse_sweep(args.sweep)
         sweep(items, name, values)
         if args.cross_validate:
-            cross_validate(items, name, values, args.block_size, args.folds)
+            cross_validate(items, name, values, args.block_size, args.folds, args.group_by)
     elif args.cross_validate:
         raise SystemExit("--cross-validate は --sweep と一緒に指定してください")
 
